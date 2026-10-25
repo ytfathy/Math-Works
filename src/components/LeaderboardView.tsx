@@ -69,7 +69,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
           </div>
 
           {/* User's Current Rank Card */}
-          <div className="bg-white/10 backdrop-blur-md border border-white/20 p-4 rounded-2xl flex items-center gap-4 shadow-lg min-w-[240px]">
+          <div className="bg-white/10 backdrop-blur-md border border-white/20 p-4 rounded-2xl flex items-center gap-4 shadow-lg w-full md:w-auto min-w-0 sm:min-w-[240px]">
             <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-amber-400 to-yellow-300 text-slate-900 flex items-center justify-center text-2xl font-black shadow-md">
               #{userRank}
             </div>

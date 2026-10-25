@@ -23,6 +23,8 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   const [selectedSingle, setSelectedSingle] = useState<string>('');
   // State for multi select
   const [selectedMulti, setSelectedMulti] = useState<string[]>([]);
+  // Shuffled options for complete randomization across A, B, C, D
+  const [shuffledOptions, setShuffledOptions] = useState<{ id: string; text: string }[]>([]);
   // State for ordering
   const [orderedItems, setOrderedItems] = useState<{ id: string; text: string }[]>([]);
   // State for matching
@@ -43,6 +45,14 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
     setIsAnswerCorrect(null);
     setSelectedLeft(null);
     setMatchedPairs({});
+
+    // Thoroughly randomize options so the answer is NEVER always 'A' or the same position
+    if (question.options) {
+      const randomized = [...question.options].sort(() => Math.random() - 0.5);
+      setShuffledOptions(randomized);
+    } else {
+      setShuffledOptions([]);
+    }
 
     if (question.type === 'ordering' && question.options) {
       // Shuffle initially so it's a real puzzle
@@ -285,11 +295,12 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
       )}
 
       {/* Question Type: Multiple Choice */}
-      {question.type === 'multiple_choice' && question.options && (
+      {question.type === 'multiple_choice' && (
         <div className="grid grid-cols-1 gap-3 mb-6">
-          {question.options.map((option) => {
+          {(shuffledOptions.length > 0 ? shuffledOptions : (question.options || [])).map((option, idx) => {
             const isSelected = selectedSingle === option.id;
             const isCorrect = option.id === question.correctAnswer;
+            const displayLetter = String.fromCharCode(65 + idx);
             let btnStyle = 'bg-slate-50 hover:bg-blue-50/50 border-slate-200 text-slate-800';
 
             if (hasAnswered) {
@@ -313,7 +324,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
               >
                 <div className="flex items-center gap-3">
                   <span className="w-8 h-8 rounded-xl bg-white border border-slate-300 shadow-2xs flex items-center justify-center font-mono font-bold text-xs uppercase flex-shrink-0">
-                    {option.id}
+                    {displayLetter}
                   </span>
                   <span>{option.text}</span>
                 </div>
@@ -331,11 +342,12 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
       )}
 
       {/* Question Type: Multi Select */}
-      {question.type === 'multi_select' && question.options && (
+      {question.type === 'multi_select' && (
         <div className="grid grid-cols-1 gap-3 mb-6">
-          {question.options.map((option) => {
+          {(shuffledOptions.length > 0 ? shuffledOptions : (question.options || [])).map((option, idx) => {
             const isSelected = selectedMulti.includes(option.id);
             const isExpected = (question.correctAnswer as string[]).includes(option.id);
+            const displayLetter = String.fromCharCode(65 + idx);
             let boxStyle = 'bg-slate-50 hover:bg-blue-50/50 border-slate-200 text-slate-800';
 
             if (hasAnswered) {
@@ -367,6 +379,9 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
                   >
                     {isSelected && <span className="text-xs font-black">✓</span>}
                   </div>
+                  <span className="w-7 h-7 rounded-lg bg-white border border-slate-300 shadow-2xs flex items-center justify-center font-mono font-bold text-xs uppercase flex-shrink-0">
+                    {displayLetter}
+                  </span>
                   <span>{option.text}</span>
                 </div>
 

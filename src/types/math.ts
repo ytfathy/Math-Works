@@ -60,6 +60,27 @@ export interface MathModule {
   lessons: MathLesson[];
 }
 
+export interface UserAccount {
+  id: string;
+  username: string;
+  email: string;
+  password: string;
+  displayName: string;
+  avatar: string;
+  companionId: string;
+  role?: 'admin' | 'student';
+  isAdmin?: boolean;
+  unlockedAllLevels?: boolean; // Default false for students (can only play Level 1/Module 1)
+  createdAt: number;
+  totalXp: number;
+  stars: number;
+  streak: number;
+  bestStreak: number;
+  completedQuestionIds: string[];
+  answeredStats: Record<string, { correct: boolean; attempts: number }>;
+  unlockedBadgeIds: string[];
+}
+
 export interface StudentProgress {
   studentName: string;
   avatarId: string;

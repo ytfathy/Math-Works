@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { MODULES_DATA, INITIAL_LEADERBOARD_DATA } from './data/modulesData';
 import { BADGES, STUDENT_LEVELS, getLevelForXp } from './data/rewards';
 import { COMPANIONS } from './data/characters';
 import { sounds } from './services/soundEffects';
-import { Question } from './types/math';
+import { Question, UserAccount, LeaderboardEntry } from './types/math';
+import { authService } from './services/authService';
 
 import { Navbar } from './components/Navbar';
 import { CharacterCompanion } from './components/CharacterCompanion';
@@ -12,38 +13,68 @@ import { LeaderboardView } from './components/LeaderboardView';
 import { ProgressDashboard } from './components/ProgressDashboard';
 import { Scratchpad } from './components/Scratchpad';
 import { RewardModal } from './components/RewardModal';
+import { AuthModal } from './components/AuthModal';
+import { AdminControlModal } from './components/AdminControlModal';
+import { triggerModuleCompleteCelebration, triggerLevelUpCelebration } from './utils/celebrationEffects';
 
 export default function App() {
   // Navigation State
   const [activeTab, setActiveTab] = useState<'modules' | 'practice' | 'leaderboard' | 'progress' | 'scratchpad'>('modules');
 
-  // Student Persistence State
+  // User Account & Authentication State
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
+    return authService.getCurrentUser();
+  });
+  // Open auth modal on first launch if user is not signed in
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(() => {
+    return !authService.getCurrentUser();
+  });
+  // Admin Control Modal State
+  const [isAdminControlOpen, setIsAdminControlOpen] = useState<boolean>(false);
+
+  // All Registered Users State (Synced across devices)
+  const [allUsers, setAllUsers] = useState<UserAccount[]>(() => authService.getUsers());
+
+  // Student Stats State (Synchronized with currentUser or default)
   const [studentName, setStudentName] = useState<string>(() => {
-    return localStorage.getItem('hmh_student_name') || 'Jordan';
+    const user = authService.getCurrentUser();
+    return user ? user.username : (localStorage.getItem('hmh_student_name') || 'Guest');
   });
   const [avatarId, setAvatarId] = useState<string>(() => {
-    return localStorage.getItem('hmh_student_avatar') || '🌟';
+    const user = authService.getCurrentUser();
+    return user ? user.avatar : (localStorage.getItem('hmh_student_avatar') || '🌟');
   });
   const [companionId, setCompanionId] = useState<string>(() => {
-    return localStorage.getItem('hmh_companion_id') || 'nibbles';
+    const user = authService.getCurrentUser();
+    return user ? user.companionId : (localStorage.getItem('hmh_companion_id') || 'nibbles');
   });
   const [totalXp, setTotalXp] = useState<number>(() => {
+    const user = authService.getCurrentUser();
+    if (user) return user.totalXp;
     const val = localStorage.getItem('hmh_total_xp');
     return val ? parseInt(val, 10) : 100;
   });
   const [stars, setStars] = useState<number>(() => {
+    const user = authService.getCurrentUser();
+    if (user) return user.stars;
     const val = localStorage.getItem('hmh_stars');
     return val ? parseInt(val, 10) : 2;
   });
   const [streak, setStreak] = useState<number>(() => {
+    const user = authService.getCurrentUser();
+    if (user) return user.streak;
     const val = localStorage.getItem('hmh_streak');
     return val ? parseInt(val, 10) : 0;
   });
   const [bestStreak, setBestStreak] = useState<number>(() => {
+    const user = authService.getCurrentUser();
+    if (user) return user.bestStreak;
     const val = localStorage.getItem('hmh_best_streak');
     return val ? parseInt(val, 10) : 0;
   });
   const [completedQuestionIds, setCompletedQuestionIds] = useState<string[]>(() => {
+    const user = authService.getCurrentUser();
+    if (user) return user.completedQuestionIds;
     try {
       return JSON.parse(localStorage.getItem('hmh_completed_questions') || '[]');
     } catch {
@@ -51,6 +82,8 @@ export default function App() {
     }
   });
   const [answeredStats, setAnsweredStats] = useState<Record<string, { correct: boolean; attempts: number }>>(() => {
+    const user = authService.getCurrentUser();
+    if (user) return user.answeredStats;
     try {
       return JSON.parse(localStorage.getItem('hmh_answered_stats') || '{}');
     } catch {
@@ -58,6 +91,8 @@ export default function App() {
     }
   });
   const [unlockedBadgeIds, setUnlockedBadgeIds] = useState<string[]>(() => {
+    const user = authService.getCurrentUser();
+    if (user) return user.unlockedBadgeIds;
     try {
       return JSON.parse(localStorage.getItem('hmh_unlocked_badges') || '["first_step"]');
     } catch {
@@ -106,7 +141,43 @@ export default function App() {
     localStorage.setItem('hmh_sound_enabled', String(soundEnabled));
   }, [soundEnabled]);
 
-  // Persist student data
+  // Subscribe to real-time user database updates
+  useEffect(() => {
+    const unsub = authService.subscribe((updatedUsers) => {
+      setAllUsers(updatedUsers);
+    });
+    return unsub;
+  }, []);
+
+  // Real-time server sync: keeps accounts updated across devices in real time
+  useEffect(() => {
+    const syncUsers = async () => {
+      const freshUsers = await authService.fetchUsersFromServer();
+      setAllUsers(freshUsers);
+      const activeId = authService.getCurrentUserId();
+      if (activeId) {
+        const found = freshUsers.find(u => u.id === activeId);
+        if (found) {
+          setCurrentUser(found);
+        }
+      }
+    };
+
+    syncUsers();
+
+    // Re-sync on window/tab focus
+    window.addEventListener('focus', syncUsers);
+
+    // Periodic background sync every 4 seconds to catch newly registered accounts from any device
+    const interval = setInterval(syncUsers, 4000);
+
+    return () => {
+      window.removeEventListener('focus', syncUsers);
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Persist student data to current user account and localStorage fallback
   useEffect(() => {
     localStorage.setItem('hmh_student_name', studentName);
     localStorage.setItem('hmh_student_avatar', avatarId);
@@ -118,7 +189,24 @@ export default function App() {
     localStorage.setItem('hmh_completed_questions', JSON.stringify(completedQuestionIds));
     localStorage.setItem('hmh_answered_stats', JSON.stringify(answeredStats));
     localStorage.setItem('hmh_unlocked_badges', JSON.stringify(unlockedBadgeIds));
+
+    // Save to account in user DB
+    if (currentUser) {
+      authService.updateUserData(currentUser.id, {
+        displayName: studentName,
+        avatar: avatarId,
+        companionId,
+        totalXp,
+        stars,
+        streak,
+        bestStreak,
+        completedQuestionIds,
+        answeredStats,
+        unlockedBadgeIds,
+      });
+    }
   }, [
+    currentUser,
     studentName,
     avatarId,
     companionId,
@@ -133,6 +221,63 @@ export default function App() {
 
   // Level calculations
   const levelInfo = getLevelForXp(totalXp);
+
+  // Access Permission Helper: Module 1 is always unlocked. Modules 2 & 3 require admin role or unlockedAllLevels permission!
+  const canAccessModule = (moduleId: string): boolean => {
+    if (moduleId === 'module-1') return true;
+    if (currentUser?.role === 'admin' || currentUser?.isAdmin || currentUser?.username.toLowerCase() === 'admin') {
+      return true;
+    }
+    return Boolean(currentUser?.unlockedAllLevels);
+  };
+
+  // Handle successful login or account creation
+  const handleAuthSuccess = (user: UserAccount) => {
+    setCurrentUser(user);
+    setStudentName(user.username);
+    setAvatarId(user.avatar || '🌟');
+    setCompanionId(user.companionId || 'nibbles');
+    setTotalXp(user.totalXp);
+    setStars(user.stars);
+    setStreak(user.streak);
+    setBestStreak(user.bestStreak);
+    setCompletedQuestionIds(user.completedQuestionIds || []);
+    setAnsweredStats(user.answeredStats || {});
+    setUnlockedBadgeIds(user.unlockedBadgeIds || ['first_step']);
+    setIsAuthModalOpen(false);
+
+    setCompanionReaction('celebrating');
+    if (user.role === 'admin' || user.username.toLowerCase() === 'admin') {
+      setCustomCompanionMsg(`مرحباً سيادة المشرف (${user.username})! يمكنك التحكم بجميع الحسابات من زر "أدمن كنترول" 🛡️`);
+    } else {
+      setCustomCompanionMsg(`أهلاً بك يا ${user.username}! جاهز لرحلة الرياضيات اليوم؟`);
+    }
+  };
+
+  // Handle logout
+  const handleLogout = () => {
+    authService.logout();
+    setCurrentUser(null);
+    setStudentName('Guest');
+    setAvatarId('🌟');
+    setCompanionId('nibbles');
+    setTotalXp(100);
+    setStars(2);
+    setStreak(0);
+    setBestStreak(0);
+    setCompletedQuestionIds([]);
+    setAnsweredStats({});
+    setUnlockedBadgeIds(['first_step']);
+    setIsAuthModalOpen(true);
+  };
+
+  // Refresh current user permissions after admin changes
+  const handleAdminUsersUpdated = () => {
+    const updated = authService.getCurrentUser();
+    if (updated) {
+      setCurrentUser(updated);
+    }
+  };
 
   // Check badges unlock
   const checkBadgeUnlocks = (newXp: number, newStreak: number, newCompleted: string[]) => {
@@ -187,8 +332,17 @@ export default function App() {
     }
   };
 
-  // Start a specific lesson
+  // Start a specific lesson with level lock check
   const startLesson = (moduleId: string, lessonId: string) => {
+    if (!canAccessModule(moduleId)) {
+      sounds.playWrong();
+      setCompanionReaction('incorrect');
+      setCustomCompanionMsg(
+        '🔒 هذا المستوى مقفل حالياً! يسمح لك بلعب المستوى 1 فقط (Level 1) حتى يمنحك المشرف (Admin) إذن فتح باقي المستويات من لوحة أدمن كنترول.'
+      );
+      return;
+    }
+
     sounds.playPop();
     setSelectedModuleId(moduleId);
     setSelectedLessonId(lessonId);
@@ -198,10 +352,12 @@ export default function App() {
     setCustomCompanionMsg(undefined);
   };
 
-  // Start practice arena with all questions
+  // Start practice arena with questions filtered by unlocked modules
   const startPracticeArena = () => {
     sounds.playPop();
-    const all = MODULES_DATA.flatMap(m => m.lessons.flatMap(l => l.questions));
+    const hasFullAccess = canAccessModule('module-2');
+    const availableModules = hasFullAccess ? MODULES_DATA : [MODULES_DATA[0]];
+    const all = availableModules.flatMap(m => m.lessons.flatMap(l => l.questions));
     const shuffled = [...all].sort(() => Math.random() - 0.5);
     setPracticeQueue(shuffled);
     setPracticeIndex(0);
@@ -242,6 +398,7 @@ export default function App() {
       const oldLvl = levelInfo.level;
       const newLvl = getLevelForXp(newXp).level;
       if (newLvl > oldLvl) {
+        triggerLevelUpCelebration(3500);
         setRewardModal({
           isOpen: true,
           type: 'level_up',
@@ -309,6 +466,7 @@ export default function App() {
         setPracticeIndex(practiceIndex + 1);
       } else {
         // Practice finished
+        triggerModuleCompleteCelebration(3500);
         setRewardModal({
           isOpen: true,
           type: 'module_complete',
@@ -326,35 +484,95 @@ export default function App() {
     if (currentQuestionIndex < lessonQuestions.length - 1) {
       setCurrentQuestionIndex(currentQuestionIndex + 1);
     } else {
-      // Completed lesson!
+      // Completed lesson or full module!
       sounds.playLevelUp();
       setCompanionReaction('celebrating');
-      setRewardModal({
-        isOpen: true,
-        type: 'module_complete',
-        title: 'Lesson Challenge Complete! 🎉',
-        subtitle: 'Outstanding work solving all textbook problems in this section!',
-        xpEarned: 200,
-        streak,
-      });
+
+      const currentMod = MODULES_DATA.find(m => m.id === selectedModuleId);
+      const allModQIds = currentMod ? currentMod.lessons.flatMap(l => l.questions.map(q => q.id)) : [];
+      const isEntireModDone = allModQIds.length > 0 && allModQIds.every(id => completedQuestionIds.includes(id));
+
+      if (isEntireModDone) {
+        triggerModuleCompleteCelebration(4200);
+        setRewardModal({
+          isOpen: true,
+          type: 'module_complete',
+          title: `🏆 مبروك! أنهيت ${currentMod?.title || 'المستوى'} 100%!`,
+          subtitle: 'لقد أتممت بنجاح جميع دروس وتمارين هذا المستوى! ألعاب نارية وشهادة تفوق لك!',
+          xpEarned: 500,
+          streak,
+          badgeIcon: '🏆',
+        });
+      } else {
+        triggerModuleCompleteCelebration(3200);
+        setRewardModal({
+          isOpen: true,
+          type: 'module_complete',
+          title: 'Lesson Challenge Complete! 🎉',
+          subtitle: 'Outstanding work solving all textbook problems in this section!',
+          xpEarned: 200,
+          streak,
+        });
+      }
       setSelectedLessonId(null);
     }
   };
 
   const handleResetProgress = () => {
     sounds.playPop();
-    setTotalXp(0);
-    setStars(0);
+    setTotalXp(100);
+    setStars(2);
     setStreak(0);
     setBestStreak(0);
     setCompletedQuestionIds([]);
     setAnsweredStats({});
     setUnlockedBadgeIds(['first_step']);
-    localStorage.clear();
+    if (currentUser) {
+      authService.updateUserData(currentUser.id, {
+        totalXp: 100,
+        stars: 2,
+        streak: 0,
+        bestStreak: 0,
+        completedQuestionIds: [],
+        answeredStats: {},
+        unlockedBadgeIds: ['first_step'],
+      });
+    }
   };
 
+  // Combined leaderboard with registered accounts
+  const combinedLeaderboardEntries = useMemo(() => {
+    const userEntries: LeaderboardEntry[] = allUsers.map(u => ({
+      id: u.id,
+      rank: 0,
+      name: u.username,
+      avatar: u.avatar || '🌟',
+      companion: u.companionId || 'nibbles',
+      moduleScore: u.totalXp,
+      totalXp: u.id === currentUser?.id ? totalXp : u.totalXp,
+      stars: u.id === currentUser?.id ? stars : u.stars,
+      level: getLevelForXp(u.id === currentUser?.id ? totalXp : u.totalXp).level,
+      isCurrentUser: u.id === currentUser?.id,
+    }));
+
+    const combined = [...userEntries];
+    INITIAL_LEADERBOARD_DATA.forEach(initial => {
+      if (!combined.some(c => c.name.toLowerCase() === initial.name.toLowerCase())) {
+        combined.push(initial);
+      }
+    });
+
+    return combined;
+  }, [allUsers, currentUser, totalXp, stars]);
+
+  const isAdminUser = Boolean(
+    currentUser?.role === 'admin' ||
+    currentUser?.isAdmin ||
+    currentUser?.username.toLowerCase() === 'admin'
+  );
+
   return (
-    <div className="min-h-screen bg-slate-100/90 text-slate-800 flex flex-col font-sans">
+    <div className="min-h-screen bg-slate-100/90 text-slate-800 flex flex-col font-sans w-full max-w-full overflow-x-hidden">
       {/* Top Navbar */}
       <Navbar
         activeTab={activeTab}
@@ -374,10 +592,82 @@ export default function App() {
         soundEnabled={soundEnabled}
         onToggleSound={() => setSoundEnabled(!soundEnabled)}
         onOpenScratchpad={() => setActiveTab('scratchpad')}
+        currentUser={currentUser}
+        onOpenAuthModal={() => setIsAuthModalOpen(true)}
+        onLogout={handleLogout}
+        onOpenAdminControl={() => setIsAdminControlOpen(true)}
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 md:p-8 space-y-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 md:p-8 space-y-4 sm:space-y-6 overflow-x-hidden">
+        {/* Admin Special Banner */}
+        {isAdminUser && (
+          <div className="bg-gradient-to-r from-purple-900 via-indigo-950 to-blue-900 text-white p-3.5 sm:p-4 rounded-2xl border-2 border-purple-400/40 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span className="text-3xl">🛡️</span>
+              <div>
+                <div className="text-xs sm:text-sm font-black text-amber-300">
+                  لوحة تحكم المشرف العام (Logged in as Admin)
+                </div>
+                <div className="text-[11px] sm:text-xs text-purple-200">
+                  جميع المستويات مفتوحة لك، ويمكنك فتح أو قفل المستويات للطلاب بضغطة زر واحدة.
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                sounds.playPop();
+                setIsAdminControlOpen(true);
+              }}
+              className="w-full sm:w-auto px-4 py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center justify-center gap-2"
+            >
+              <span>🛡️ أدمن كنترول</span>
+              <span className="text-[10px] bg-slate-950 text-amber-300 px-1.5 py-0.5 rounded">فتح</span>
+            </button>
+          </div>
+        )}
+
+        {/* Regular Student Level Notice (When only Level 1 is open) */}
+        {!isAdminUser && currentUser && !currentUser.unlockedAllLevels && (
+          <div className="bg-blue-50 border-2 border-blue-200 rounded-2xl p-3 sm:p-3.5 flex items-center justify-between gap-2 shadow-xs">
+            <div className="flex items-center gap-2.5">
+              <span className="text-xl">ℹ️</span>
+              <div className="text-xs text-blue-900">
+                <span className="font-bold">المستوى المتاح لك حالياً:</span> المستوى 1 (Module 1). باقي المستويات يتم فتحها بواسطة المشرف أو المعلم من لوحة التحكم.
+              </div>
+            </div>
+            <span className="text-[11px] font-black text-blue-700 bg-blue-100 px-2 py-0.5 rounded-md flex-shrink-0">
+              Level 1 Active
+            </span>
+          </div>
+        )}
+
+        {/* User Account Bar Notice if Guest */}
+        {!currentUser && (
+          <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-3 sm:p-4 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xs w-full max-w-full">
+            <div className="flex items-center gap-2.5 sm:gap-3 w-full sm:w-auto min-w-0">
+              <span className="text-2xl flex-shrink-0">👤</span>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs sm:text-sm font-extrabold text-amber-900 truncate">
+                  أنت تلعب كزائر حالياً (Guest Mode)
+                </div>
+                <div className="text-[11px] sm:text-xs text-amber-700 leading-tight">
+                  سجل حسابك مجاناً بالجيميل واسم المستخدم لحفظ نقاطك ودرجاتك والصعود في قائمة الشرف!
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                sounds.playPop();
+                setIsAuthModalOpen(true);
+              }}
+              className="w-full sm:w-auto px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs rounded-xl shadow transition cursor-pointer text-center flex-shrink-0"
+            >
+              تسجيل الدخول / إنشاء حساب 🚀
+            </button>
+          </div>
+        )}
+
         {/* Companion Chat & Feedback Row (Always accessible across game) */}
         <CharacterCompanion
           companionId={companionId}
@@ -419,102 +709,176 @@ export default function App() {
                     const allModQIds = module.lessons.flatMap(l => l.questions.map(q => q.id));
                     const completedInMod = allModQIds.filter(id => completedQuestionIds.includes(id));
                     const pct = Math.round((completedInMod.length / allModQIds.length) * 100);
+                    const isUnlocked = canAccessModule(module.id);
 
                     return (
                       <div
                         key={module.id}
-                        className="bg-white rounded-3xl p-6 border-2 border-slate-200 shadow-md flex flex-col justify-between hover:border-slate-300 hover:shadow-lg transition relative overflow-hidden"
+                        className={`bg-white rounded-3xl p-6 border-2 shadow-md flex flex-col justify-between transition relative overflow-hidden ${
+                          isUnlocked
+                            ? 'border-slate-200 hover:border-slate-300 hover:shadow-lg'
+                            : 'border-slate-200 bg-slate-50/70 opacity-90'
+                        }`}
                       >
                         {/* Module Top Accent bar */}
                         <div
                           className="absolute top-0 left-0 right-0 h-2.5"
-                          style={{ backgroundColor: module.themeColor }}
+                          style={{ backgroundColor: isUnlocked ? module.themeColor : '#94a3b8' }}
                         />
 
                         <div>
                           <div className="flex items-center justify-between mb-3 pt-1">
                             <span
                               className="text-xs font-black uppercase tracking-wider px-2.5 py-1 rounded-lg text-white"
-                              style={{ backgroundColor: module.themeColor }}
+                              style={{ backgroundColor: isUnlocked ? module.themeColor : '#64748b' }}
                             >
                               Module {module.number}
                             </span>
-                            <span className="text-xs font-mono font-bold text-slate-500">
-                              {completedInMod.length}/{allModQIds.length} Mastered
-                            </span>
+                            {isUnlocked ? (
+                              <span className={`text-xs font-bold px-2.5 py-1 rounded-lg ${
+                                pct === 100 
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 font-black' 
+                                  : 'text-slate-500 bg-slate-100 font-mono'
+                              }`}>
+                                {pct === 100 ? '✅ مكتمل 100%' : `${completedInMod.length}/${allModQIds.length} Mastered`}
+                              </span>
+                            ) : (
+                              <span className="text-xs font-black text-amber-800 bg-amber-100 px-2 py-0.5 rounded-md border border-amber-300 flex items-center gap-1">
+                                <span>🔒</span>
+                                <span>مقفل</span>
+                              </span>
+                            )}
                           </div>
 
-                          <h3 className="text-xl font-black text-slate-900 mb-2">
-                            {module.title}
-                          </h3>
+                          {/* Full Module Completed Celebration Banner */}
+                          {isUnlocked && pct === 100 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                sounds.playLevelUp();
+                                triggerModuleCompleteCelebration(3200);
+                              }}
+                              className="w-full mb-3 p-2.5 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white rounded-xl shadow-xs flex items-center justify-between font-black text-xs transition cursor-pointer active:scale-98"
+                              title="انقر لإطلاق الألعاب النارية والاحتفال بإنجازك!"
+                            >
+                              <span className="flex items-center gap-1.5">
+                                <span>🏆</span>
+                                <span>تم إكمال المستوى بالكامل!</span>
+                              </span>
+                              <span className="bg-white/25 px-2 py-0.5 rounded-lg text-[10px] flex items-center gap-1">
+                                <span>100%</span>
+                                <span>🎉 احتفل</span>
+                              </span>
+                            </button>
+                          )}
+
+                          <div className="flex items-center gap-2 mb-2">
+                            <h3 className="text-xl font-black text-slate-900">
+                              {module.title}
+                            </h3>
+                            {!isUnlocked && <span className="text-lg">🔒</span>}
+                            {isUnlocked && pct === 100 && <span className="text-emerald-600 text-lg">✅</span>}
+                          </div>
+                          
                           <p className="text-xs text-slate-600 leading-relaxed mb-4">
                             {module.description}
                           </p>
 
                           {/* Progress Meter */}
-                          <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden mb-5">
+                          <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden mb-5">
                             <div
-                              className="h-full rounded-full transition-all duration-500"
-                              style={{ width: `${pct}%`, backgroundColor: module.themeColor }}
+                              className={`h-full rounded-full transition-all duration-500 ${
+                                pct === 100 ? 'bg-emerald-500 shadow-sm' : ''
+                              }`}
+                              style={{
+                                width: `${pct}%`,
+                                backgroundColor: pct === 100 ? undefined : (isUnlocked ? module.themeColor : '#94a3b8'),
+                              }}
                             />
                           </div>
 
                           {/* Lessons in Module */}
-                          <div className="space-y-2 mb-4">
+                          <div className="space-y-2.5 mb-4">
                             {module.lessons.map(lesson => {
-                              const lessonDone = lesson.questions.every(q => completedQuestionIds.includes(q.id));
+                              const lessonDone = lesson.questions.length > 0 && lesson.questions.every(q => completedQuestionIds.includes(q.id));
                               return (
                                 <button
                                   key={lesson.id}
                                   onClick={() => startLesson(module.id, lesson.id)}
-                                  className={`w-full p-3 rounded-2xl text-left border text-xs font-bold transition flex items-center justify-between cursor-pointer ${
-                                    lessonDone
-                                      ? 'bg-emerald-50 border-emerald-300 text-emerald-950 hover:bg-emerald-100'
+                                  className={`w-full p-3.5 rounded-2xl text-left border-2 text-xs font-bold transition flex items-center justify-between cursor-pointer ${
+                                    !isUnlocked
+                                      ? 'bg-slate-100 border-slate-200 text-slate-500 hover:bg-amber-50 hover:border-amber-300 hover:text-amber-900'
+                                      : lessonDone
+                                      ? 'bg-emerald-100/90 border-emerald-500 text-emerald-950 font-black shadow-sm ring-2 ring-emerald-300/40 hover:bg-emerald-200/80'
                                       : 'bg-slate-50 border-slate-200 text-slate-800 hover:bg-blue-50 hover:border-blue-300'
                                   }`}
                                 >
-                                  <div className="flex items-center gap-2">
-                                    <span>{lessonDone ? '✅' : '🎯'}</span>
-                                    <span className="truncate max-w-[200px]">{lesson.title}</span>
+                                  <div className="flex items-center gap-2.5">
+                                    {lessonDone ? (
+                                      <span className="w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center text-xs font-black shadow-2xs">
+                                        ✓
+                                      </span>
+                                    ) : (
+                                      <span>{!isUnlocked ? '🔒' : '🎯'}</span>
+                                    )}
+                                    <span className={`truncate max-w-[200px] ${lessonDone ? 'font-black text-emerald-950' : ''}`}>
+                                      {lesson.title}
+                                    </span>
                                   </div>
-                                  <span className="text-[11px] font-mono text-slate-500">
-                                    {lesson.questions.length} Qs
-                                  </span>
+
+                                  {lessonDone ? (
+                                    <span className="text-[11px] font-black text-emerald-900 bg-emerald-200/90 border border-emerald-400 px-2.5 py-1 rounded-xl flex items-center gap-1 shadow-2xs">
+                                      <span>مكتمل 100%</span>
+                                      <span className="text-emerald-700">⭐</span>
+                                    </span>
+                                  ) : (
+                                    <span className="text-[11px] font-mono text-slate-500">
+                                      {!isUnlocked ? 'إذن الأدمن' : `${lesson.questions.length} Qs`}
+                                    </span>
+                                  )}
                                 </button>
                               );
                             })}
                           </div>
-                        </div>
 
-                        <button
-                          onClick={() => startLesson(module.id, module.lessons[0].id)}
-                          className="w-full py-3 rounded-2xl text-white font-extrabold text-sm shadow-md transition cursor-pointer hover:opacity-95"
-                          style={{ backgroundColor: module.themeColor }}
-                        >
-                          Play Module {module.number} ➔
-                        </button>
+                          {/* Lock explanation for non-unlocked modules */}
+                          {!isUnlocked && (
+                            <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] font-bold text-amber-800 flex items-center gap-2">
+                              <span>🔒</span>
+                              <span>مقفل حتى يمنحك المشرف (Admin) إذن فتح جميع المستويات.</span>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     );
                   })}
                 </div>
               </>
             ) : (
-              /* Active Lesson Question View */
-              <div className="max-w-3xl mx-auto space-y-4">
-                {/* Back to Module selection */}
-                <div className="flex items-center justify-between">
+              /* Active Lesson Quiz View */
+              <div className="space-y-4">
+                <div className="flex items-center justify-between bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
                   <button
                     onClick={() => {
                       sounds.playPop();
                       setSelectedLessonId(null);
                     }}
-                    className="text-xs font-bold text-slate-600 hover:text-slate-900 bg-white hover:bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                    className="flex items-center gap-2 text-xs font-bold text-slate-600 hover:text-slate-900 transition cursor-pointer"
                   >
-                    <span>⬅ Back to Modules</span>
+                    <span>← Back to Modules</span>
                   </button>
 
-                  <div className="text-xs font-mono font-bold text-slate-600 bg-white px-3 py-1.5 rounded-xl border border-slate-200 shadow-2xs">
-                    Question {currentQuestionIndex + 1} of {getActiveLessonQuestions().length}
+                  <div className="flex items-center gap-2">
+                    {getActiveLessonQuestions().length > 0 &&
+                      getActiveLessonQuestions().every(q => completedQuestionIds.includes(q.id)) && (
+                        <span className="text-xs font-black text-emerald-800 bg-emerald-100 border border-emerald-300 px-2.5 py-1 rounded-lg flex items-center gap-1">
+                          <span>✅</span>
+                          <span>مكتمل 100%</span>
+                        </span>
+                    )}
+                    <div className="text-xs font-mono font-bold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-lg">
+                      Question {currentQuestionIndex + 1} of {getActiveLessonQuestions().length}
+                    </div>
                   </div>
                 </div>
 
@@ -534,14 +898,14 @@ export default function App() {
 
         {/* VIEW 2: PRACTICE ARENA */}
         {activeTab === 'practice' && (
-          <div className="max-w-3xl mx-auto space-y-4">
-            <div className="flex items-center justify-between bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
+          <div className="space-y-4">
+            <div className="flex items-center justify-between bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
               <div className="flex items-center gap-2">
                 <span className="text-xl">⚡</span>
                 <div>
                   <h3 className="font-black text-base text-slate-900">Speed Practice Arena</h3>
                   <div className="text-xs text-slate-500">
-                    Randomized challenges across all 3 modules
+                    {canAccessModule('module-2') ? 'Randomized challenges across all modules' : 'Challenges across Module 1'}
                   </div>
                 </div>
               </div>
@@ -584,7 +948,7 @@ export default function App() {
         {/* VIEW 3: LEADERBOARD */}
         {activeTab === 'leaderboard' && (
           <LeaderboardView
-            entries={INITIAL_LEADERBOARD_DATA}
+            entries={combinedLeaderboardEntries}
             currentStudentName={studentName}
             currentStudentXp={totalXp}
             currentStudentStars={stars}
@@ -622,6 +986,21 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Auth Screen Modal (Sign In / Register with Username, Gmail, Password) */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        canDismiss={true}
+        onClose={() => setIsAuthModalOpen(false)}
+        onSuccess={handleAuthSuccess}
+      />
+
+      {/* Exclusive Admin Control Modal */}
+      <AdminControlModal
+        isOpen={isAdminControlOpen}
+        onClose={() => setIsAdminControlOpen(false)}
+        onUsersUpdated={handleAdminUsersUpdated}
+      />
 
       {/* Celebration & Reward Modal */}
       <RewardModal
