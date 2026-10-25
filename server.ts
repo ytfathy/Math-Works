@@ -10,6 +10,8 @@ const __dirname = path.dirname(__filename);
 const PORT = 3000;
 const DB_FILE = path.resolve(__dirname, 'users_db.json');
 const BACKUP_FILE = path.resolve(__dirname, 'users_db.backup.json');
+const SEED_FILE = path.resolve(__dirname, 'users_db.seed.json');
+const DELETED_FILE = path.resolve(__dirname, 'deleted_users.json');
 
 interface UserAccount {
   id: string;
@@ -27,6 +29,7 @@ interface UserAccount {
   stars: number;
   streak: number;
   bestStreak: number;
+  lastDailyBonusDate?: string;
   completedQuestionIds: string[];
   answeredStats: Record<string, { correct: boolean; attempts: number }>;
   unlockedBadgeIds: string[];
@@ -99,51 +102,200 @@ const DEFAULT_STUDENTS: UserAccount[] = [
       'm1-l1-q1': { correct: true, attempts: 1 }
     },
     unlockedBadgeIds: ['first_step']
+  },
+  {
+    id: 'user_1792947169624_9v284',
+    username: 'Youssef',
+    email: 'youssef@gmail.com',
+    password: 'password123',
+    displayName: 'Youssef',
+    avatar: '🌟',
+    companionId: 'nibbles',
+    role: 'student',
+    isAdmin: false,
+    unlockedAllLevels: false,
+    createdAt: 1792947169624,
+    totalXp: 100,
+    stars: 2,
+    streak: 0,
+    bestStreak: 0,
+    completedQuestionIds: [],
+    answeredStats: {},
+    unlockedBadgeIds: ['first_step']
+  },
+  {
+    id: 'user_1792947244616_fotba',
+    username: 'Ziad',
+    email: 'ziad@gmail.com',
+    password: 'password123',
+    displayName: 'Ziad',
+    avatar: '🌟',
+    companionId: 'nibbles',
+    role: 'student',
+    isAdmin: false,
+    unlockedAllLevels: false,
+    createdAt: 1792947244616,
+    totalXp: 100,
+    stars: 2,
+    streak: 0,
+    bestStreak: 0,
+    completedQuestionIds: [],
+    answeredStats: {},
+    unlockedBadgeIds: ['first_step']
+  },
+  {
+    id: 'user_asser_math',
+    username: 'Asser',
+    email: 'asser@gmail.com',
+    password: 'password123',
+    displayName: 'Asser (آسر)',
+    avatar: '🚀',
+    companionId: 'nibbles',
+    role: 'student',
+    isAdmin: false,
+    unlockedAllLevels: false,
+    createdAt: 1792947300000,
+    totalXp: 200,
+    stars: 3,
+    streak: 1,
+    bestStreak: 2,
+    completedQuestionIds: ['m1-l1-q1'],
+    answeredStats: {
+      'm1-l1-q1': {
+        correct: true,
+        attempts: 1
+      }
+    },
+    unlockedBadgeIds: ['first_step']
   }
 ];
 
 // In-memory master database (Single source of truth during process lifetime)
 let memoryUsers: UserAccount[] = [];
 
+// Deleted users persistent tracker (prevents deleted accounts from resurrecting)
+function loadDeletedUsers(): Set<string> {
+  if (!fs.existsSync(DELETED_FILE)) return new Set();
+  try {
+    const raw = fs.readFileSync(DELETED_FILE, 'utf8').trim();
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.map((s: string) => String(s).trim().toLowerCase()));
+    }
+  } catch {
+    // ignore
+  }
+  return new Set();
+}
+
+function addDeletedUser(userId: string, username: string): void {
+  const set = loadDeletedUsers();
+  set.add(userId.toLowerCase());
+  set.add(username.toLowerCase());
+  try {
+    fs.writeFileSync(DELETED_FILE, JSON.stringify(Array.from(set), null, 2), 'utf8');
+  } catch (err) {
+    console.error('[DB] Error saving deleted users list:', err);
+  }
+}
+
+function unmarkDeletedUser(username: string): void {
+  const set = loadDeletedUsers();
+  const key = username.toLowerCase();
+  if (set.has(key)) {
+    set.delete(key);
+    try {
+      fs.writeFileSync(DELETED_FILE, JSON.stringify(Array.from(set), null, 2), 'utf8');
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// Immediate synchronous persistence across all 3 storage files
+function persistUsersSync(): void {
+  try {
+    const jsonString = JSON.stringify(memoryUsers, null, 2);
+    fs.writeFileSync(DB_FILE, jsonString, 'utf8');
+    fs.writeFileSync(BACKUP_FILE, jsonString, 'utf8');
+    fs.writeFileSync(SEED_FILE, jsonString, 'utf8');
+  } catch (err) {
+    console.error('[DB] Error writing users to disk synchronously:', err);
+  }
+}
+
+// Safe file parser helper
+function loadUsersFromFile(filePath: string): UserAccount[] {
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8').trim();
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed;
+    }
+  } catch (err) {
+    console.error(`[DB] Could not parse file at ${filePath}:`, err);
+  }
+  return [];
+}
+
 // Initialize memory database from disk safely
 function initUsersDatabase(): void {
-  let loaded: UserAccount[] | null = null;
+  const usersMap = new Map<string, UserAccount>();
+  const deletedSet = loadDeletedUsers();
 
-  // Try primary DB file
-  if (fs.existsSync(DB_FILE)) {
-    try {
-      const content = fs.readFileSync(DB_FILE, 'utf8').trim();
-      if (content.length > 0) {
-        const parsed = JSON.parse(content);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          loaded = parsed;
-        }
+  const mergeUserList = (list: UserAccount[], sourceLabel: string) => {
+    for (const u of list) {
+      if (!u || !u.username) continue;
+      const key = u.username.trim().toLowerCase();
+      // If student was deleted by admin, never resurrect!
+      if (deletedSet.has(u.id.toLowerCase()) || deletedSet.has(key)) {
+        continue;
       }
-    } catch (err) {
-      console.error('[DB] Error parsing primary DB file, attempting backup...', err);
-    }
-  }
 
-  // Try backup file if primary failed or was empty
-  if (!loaded && fs.existsSync(BACKUP_FILE)) {
-    try {
-      const content = fs.readFileSync(BACKUP_FILE, 'utf8').trim();
-      if (content.length > 0) {
-        const parsed = JSON.parse(content);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          loaded = parsed;
-          console.log('[DB] Successfully restored users from backup file.');
-        }
+      const existing = usersMap.get(key);
+      if (!existing) {
+        usersMap.set(key, u);
+      } else {
+        const totalXp = Math.max(existing.totalXp || 0, u.totalXp || 0);
+        const stars = Math.max(existing.stars || 0, u.stars || 0);
+        const streak = Math.max(existing.streak || 0, u.streak || 0);
+        const bestStreak = Math.max(existing.bestStreak || 0, u.bestStreak || 0);
+        const unlockedAllLevels = Boolean(existing.unlockedAllLevels || u.unlockedAllLevels);
+        const completedQuestionIds = Array.from(new Set([
+          ...(existing.completedQuestionIds || []),
+          ...(u.completedQuestionIds || [])
+        ]));
+        usersMap.set(key, {
+          ...existing,
+          ...u,
+          password: existing.password || u.password,
+          totalXp,
+          stars,
+          streak,
+          bestStreak,
+          unlockedAllLevels,
+          completedQuestionIds,
+          lastDailyBonusDate: u.lastDailyBonusDate || existing.lastDailyBonusDate,
+          answeredStats: { ...(existing.answeredStats || {}), ...(u.answeredStats || {}) }
+        });
       }
-    } catch (err) {
-      console.error('[DB] Error parsing backup DB file:', err);
     }
-  }
+    console.log(`[DB] Merged ${list.length} users from ${sourceLabel}. Current unique: ${usersMap.size}`);
+  };
 
-  // Fallback to default students only if no existing file at all
-  if (!loaded || loaded.length === 0) {
-    loaded = [...DEFAULT_STUDENTS];
-  }
+  // 1. Built-in defaults (Admin, Alex, Sarah, Youssef, Ziad, Asser)
+  mergeUserList(DEFAULT_STUDENTS, 'hardcoded seeds');
+  // 2. Permanent seed archive
+  mergeUserList(loadUsersFromFile(SEED_FILE), 'seed archive');
+  // 3. Backup file
+  mergeUserList(loadUsersFromFile(BACKUP_FILE), 'backup file');
+  // 4. Primary database file
+  mergeUserList(loadUsersFromFile(DB_FILE), 'primary DB');
+
+  let loaded: UserAccount[] = Array.from(usersMap.values());
 
   // Ensure Admin always exists with exact credentials and privileges
   const adminIdx = loaded.findIndex(
@@ -164,31 +316,8 @@ function initUsersDatabase(): void {
   }
 
   memoryUsers = loaded;
-  persistUsersAtomic();
+  persistUsersSync();
   console.log(`[DB] Database initialized with ${memoryUsers.length} user accounts.`);
-}
-
-// Sequential write queue to guarantee atomic, corruption-proof file writes
-let writeQueue = Promise.resolve();
-
-function persistUsersAtomic(): void {
-  writeQueue = writeQueue.then(async () => {
-    try {
-      const jsonString = JSON.stringify(memoryUsers, null, 2);
-      const tempPath = `${DB_FILE}.${Date.now()}.${Math.random().toString(36).substring(2, 6)}.tmp`;
-
-      // 1. Write completely to temp file
-      await fs.promises.writeFile(tempPath, jsonString, 'utf8');
-
-      // 2. Atomic rename in POSIX replaces file without truncation window
-      await fs.promises.rename(tempPath, DB_FILE);
-
-      // 3. Keep a safety backup
-      await fs.promises.writeFile(BACKUP_FILE, jsonString, 'utf8').catch(() => {});
-    } catch (err) {
-      console.error('[DB] Error atomically persisting users to disk:', err);
-    }
-  });
 }
 
 // Start DB initialization
@@ -271,8 +400,9 @@ async function startServer() {
       unlockedBadgeIds: ['first_step'],
     };
 
+    unmarkDeletedUser(trimmedUsername);
     memoryUsers.push(newUser);
-    persistUsersAtomic();
+    persistUsersSync();
 
     console.log(`[API] Registered new user: ${newUser.username} (${newUser.email}). Total users: ${memoryUsers.length}`);
     res.json({
@@ -294,7 +424,7 @@ async function startServer() {
 
     // Fast-path Admin login
     if (
-      (trimmedId === 'admin' || trimmedId === 'ادمن' || trimmedId === 'admin@hmhmath.com') &&
+      (trimmedId === 'admin' || trimmedId === 'ادمن' || trimmedId === 'أدمن' || trimmedId === 'admin@hmhmath.com') &&
       trimmedPassword === '123456789'
     ) {
       const admin = memoryUsers.find(u => u.username.toLowerCase() === 'admin') || DEFAULT_ADMIN;
@@ -306,7 +436,15 @@ async function startServer() {
     }
 
     const foundUser = memoryUsers.find(
-      u => u.username.toLowerCase() === trimmedId || u.email.toLowerCase() === trimmedId
+      u => u.username.toLowerCase() === trimmedId || 
+           u.email.toLowerCase() === trimmedId ||
+           (trimmedId === 'آسر' && u.username.toLowerCase() === 'asser') ||
+           (trimmedId === 'اسر' && u.username.toLowerCase() === 'asser') ||
+           (trimmedId === 'asser' && (u.username === 'آسر' || u.username === 'اسر')) ||
+           (trimmedId === 'يوسف' && u.username.toLowerCase() === 'youssef') ||
+           (trimmedId === 'زياد' && u.username.toLowerCase() === 'ziad') ||
+           (trimmedId === 'ادمن' && u.username.toLowerCase() === 'admin') ||
+           (trimmedId === 'أدمن' && u.username.toLowerCase() === 'admin')
     );
 
     if (!foundUser) {
@@ -335,7 +473,7 @@ async function startServer() {
     }
 
     memoryUsers[index].unlockedAllLevels = Boolean(unlockedAllLevels);
-    persistUsersAtomic();
+    persistUsersSync();
 
     console.log(`[API] Admin changed levels permission for ${memoryUsers[index].username} -> ${memoryUsers[index].unlockedAllLevels}`);
     res.json({
@@ -355,21 +493,56 @@ async function startServer() {
       return res.status(404).json({ success: false, error: 'المستخدم غير موجود' });
     }
 
-    memoryUsers[index] = {
-      ...memoryUsers[index],
-      totalXp: updates.totalXp !== undefined ? updates.totalXp : memoryUsers[index].totalXp,
-      stars: updates.stars !== undefined ? updates.stars : memoryUsers[index].stars,
-      streak: updates.streak !== undefined ? updates.streak : memoryUsers[index].streak,
-      bestStreak: updates.bestStreak !== undefined ? updates.bestStreak : memoryUsers[index].bestStreak,
-      completedQuestionIds: updates.completedQuestionIds || memoryUsers[index].completedQuestionIds,
-      answeredStats: updates.answeredStats || memoryUsers[index].answeredStats,
-      unlockedBadgeIds: updates.unlockedBadgeIds || memoryUsers[index].unlockedBadgeIds,
-      avatar: updates.avatar || memoryUsers[index].avatar,
-      companionId: updates.companionId || memoryUsers[index].companionId,
+    const current = memoryUsers[index];
+
+    // Monotonic Progress Guarantee: never regress XP, stars, bestStreak, or completed questions
+    const newTotalXp = updates.totalXp !== undefined
+      ? Math.max(current.totalXp || 0, Number(updates.totalXp) || 0)
+      : current.totalXp;
+
+    const newStars = updates.stars !== undefined
+      ? Math.max(current.stars || 0, Number(updates.stars) || 0)
+      : current.stars;
+
+    const newStreak = updates.streak !== undefined ? Number(updates.streak) || 0 : current.streak;
+    const newBestStreak = Math.max(
+      current.bestStreak || 0,
+      updates.bestStreak !== undefined ? Number(updates.bestStreak) || 0 : 0,
+      newStreak
+    );
+
+    const mergedCompleted = Array.from(new Set([
+      ...(current.completedQuestionIds || []),
+      ...(Array.isArray(updates.completedQuestionIds) ? updates.completedQuestionIds : [])
+    ]));
+
+    const mergedStats = {
+      ...(current.answeredStats || {}),
+      ...(updates.answeredStats || {})
     };
 
-    persistUsersAtomic();
-    res.json({ success: true, user: memoryUsers[index] });
+    const mergedBadges = Array.from(new Set([
+      ...(current.unlockedBadgeIds || []),
+      ...(Array.isArray(updates.unlockedBadgeIds) ? updates.unlockedBadgeIds : [])
+    ]));
+
+    memoryUsers[index] = {
+      ...current,
+      displayName: updates.displayName || current.displayName,
+      avatar: updates.avatar || current.avatar,
+      companionId: updates.companionId || current.companionId,
+      totalXp: newTotalXp,
+      stars: newStars,
+      streak: newStreak,
+      bestStreak: newBestStreak,
+      completedQuestionIds: mergedCompleted,
+      answeredStats: mergedStats,
+      unlockedBadgeIds: mergedBadges,
+      lastDailyBonusDate: updates.lastDailyBonusDate || current.lastDailyBonusDate,
+    };
+
+    persistUsersSync();
+    res.json({ success: true, user: memoryUsers[index], allUsers: memoryUsers });
   });
 
   // DELETE student
@@ -380,10 +553,11 @@ async function startServer() {
       return res.status(400).json({ success: false, error: 'لا يمكن حذف حساب المشرف' });
     }
 
+    addDeletedUser(target.id, target.username);
     memoryUsers = memoryUsers.filter(u => u.id !== userId);
-    persistUsersAtomic();
+    persistUsersSync();
 
-    console.log(`[API] Deleted user ${target.username}. Remaining users: ${memoryUsers.length}`);
+    console.log(`[API] Admin permanently deleted user ${target.username}. Remaining users: ${memoryUsers.length}`);
     res.json({
       success: true,
       allUsers: memoryUsers

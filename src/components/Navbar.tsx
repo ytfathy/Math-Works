@@ -19,6 +19,7 @@ interface NavbarProps {
   onOpenAuthModal: () => void;
   onLogout: () => void;
   onOpenAdminControl?: () => void;
+  onOpenDailyStreak?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -36,6 +37,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAuthModal,
   onLogout,
   onOpenAdminControl,
+  onOpenDailyStreak,
 }) => {
   return (
     <header className="sticky top-0 z-40 w-full max-w-full bg-white/95 backdrop-blur-md border-b-2 border-slate-200 shadow-xs overflow-hidden">
@@ -94,16 +96,25 @@ export const Navbar: React.FC<NavbarProps> = ({
               <span className="font-mono">{stars}</span>
             </div>
 
-            {/* Streak Counter - Compact on mobile */}
-            {streak > 0 ? (
-              <div
-                className="flex items-center gap-0.5 sm:gap-1 px-1.5 py-1 sm:px-2.5 sm:py-1.5 rounded-xl text-[11px] sm:text-xs font-black border bg-orange-50 border-orange-300 text-orange-700 animate-pulse"
-                title={`${streak} in a row streak!`}
+            {/* Streak Counter & Daily Bonus Button */}
+            {currentUser && currentUser.role !== 'admin' && !currentUser.isAdmin && (
+              <button
+                type="button"
+                onClick={() => {
+                  sounds.playPop();
+                  if (onOpenDailyStreak) onOpenDailyStreak();
+                }}
+                className={`flex items-center gap-0.5 sm:gap-1 px-1.5 py-1 sm:px-2.5 sm:py-1.5 rounded-xl text-[11px] sm:text-xs font-black border transition cursor-pointer ${
+                  streak > 0
+                    ? 'bg-orange-50 hover:bg-orange-100 border-orange-300 text-orange-700 animate-pulse'
+                    : 'bg-amber-50 hover:bg-amber-100 border-amber-300 text-amber-800'
+                }`}
+                title="مكافأة الحضور اليومي وسلسلة الأيام (Daily Streak)"
               >
                 <span>🔥</span>
-                <span className="font-mono">{streak}x</span>
-              </div>
-            ) : null}
+                <span className="font-mono">{streak > 0 ? `${streak}x` : 'مكافأة'}</span>
+              </button>
+            )}
 
             {/* User Account / Login Button */}
             {currentUser ? (

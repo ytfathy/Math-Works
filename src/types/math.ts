@@ -76,6 +76,7 @@ export interface UserAccount {
   stars: number;
   streak: number;
   bestStreak: number;
+  lastDailyBonusDate?: string; // YYYY-MM-DD of last claimed daily streak bonus
   completedQuestionIds: string[];
   answeredStats: Record<string, { correct: boolean; attempts: number }>;
   unlockedBadgeIds: string[];

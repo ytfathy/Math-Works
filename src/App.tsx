@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { MODULES_DATA, INITIAL_LEADERBOARD_DATA } from './data/modulesData';
 import { BADGES, STUDENT_LEVELS, getLevelForXp } from './data/rewards';
 import { COMPANIONS } from './data/characters';
@@ -15,6 +15,8 @@ import { Scratchpad } from './components/Scratchpad';
 import { RewardModal } from './components/RewardModal';
 import { AuthModal } from './components/AuthModal';
 import { AdminControlModal } from './components/AdminControlModal';
+import { DailyStreakModal } from './components/DailyStreakModal';
+import { getLocalDateString, DailyBonusCalculation } from './utils/streakBonus';
 import { triggerModuleCompleteCelebration, triggerLevelUpCelebration } from './utils/celebrationEffects';
 
 export default function App() {
@@ -31,6 +33,8 @@ export default function App() {
   });
   // Admin Control Modal State
   const [isAdminControlOpen, setIsAdminControlOpen] = useState<boolean>(false);
+  // Daily Streak Bonus Modal State
+  const [isDailyStreakModalOpen, setIsDailyStreakModalOpen] = useState<boolean>(false);
 
   // All Registered Users State (Synced across devices)
   const [allUsers, setAllUsers] = useState<UserAccount[]>(() => authService.getUsers());
@@ -149,7 +153,7 @@ export default function App() {
     return unsub;
   }, []);
 
-  // Real-time server sync: keeps accounts updated across devices in real time
+  // Real-time server sync: keeps accounts updated across devices in real time with monotonic safety
   useEffect(() => {
     const syncUsers = async () => {
       const freshUsers = await authService.fetchUsersFromServer();
@@ -159,6 +163,13 @@ export default function App() {
         const found = freshUsers.find(u => u.id === activeId);
         if (found) {
           setCurrentUser(found);
+          // Monotonically integrate server progress without regressing local state:
+          setTotalXp(curr => Math.max(curr, found.totalXp ?? 100));
+          setStars(curr => Math.max(curr, found.stars ?? 2));
+          setBestStreak(curr => Math.max(curr, found.bestStreak ?? 0));
+          setCompletedQuestionIds(curr => Array.from(new Set([...curr, ...(found.completedQuestionIds || [])])));
+          setUnlockedBadgeIds(curr => Array.from(new Set([...curr, ...(found.unlockedBadgeIds || [])])));
+          setAnsweredStats(curr => ({ ...(found.answeredStats || {}), ...curr }));
         }
       }
     };
@@ -177,6 +188,8 @@ export default function App() {
     };
   }, []);
 
+  const lastSavedSnapshotRef = useRef<string>('');
+
   // Persist student data to current user account and localStorage fallback
   useEffect(() => {
     localStorage.setItem('hmh_student_name', studentName);
@@ -190,23 +203,72 @@ export default function App() {
     localStorage.setItem('hmh_answered_stats', JSON.stringify(answeredStats));
     localStorage.setItem('hmh_unlocked_badges', JSON.stringify(unlockedBadgeIds));
 
-    // Save to account in user DB
+    // Save to account in user DB only when snapshot changed
     if (currentUser) {
-      authService.updateUserData(currentUser.id, {
-        displayName: studentName,
-        avatar: avatarId,
-        companionId,
-        totalXp,
-        stars,
-        streak,
-        bestStreak,
-        completedQuestionIds,
-        answeredStats,
-        unlockedBadgeIds,
-      });
+      const currentSnapshot = `${currentUser.id}|${studentName}|${avatarId}|${companionId}|${totalXp}|${stars}|${streak}|${bestStreak}|${completedQuestionIds.length}|${unlockedBadgeIds.length}`;
+      if (lastSavedSnapshotRef.current !== currentSnapshot) {
+        lastSavedSnapshotRef.current = currentSnapshot;
+        authService.updateUserData(currentUser.id, {
+          displayName: studentName,
+          avatar: avatarId,
+          companionId,
+          totalXp,
+          stars,
+          streak,
+          bestStreak,
+          completedQuestionIds,
+          answeredStats,
+          unlockedBadgeIds,
+        });
+      }
     }
   }, [
     currentUser,
+    studentName,
+    avatarId,
+    companionId,
+    totalXp,
+    stars,
+    streak,
+    bestStreak,
+    completedQuestionIds,
+    answeredStats,
+    unlockedBadgeIds,
+  ]);
+
+  // Flush progress immediately on beforeunload or tab visibility hide
+  useEffect(() => {
+    const handleFlushOnExit = () => {
+      const activeId = authService.getCurrentUserId();
+      if (activeId) {
+        authService.updateUserData(activeId, {
+          displayName: studentName,
+          avatar: avatarId,
+          companionId,
+          totalXp,
+          stars,
+          streak,
+          bestStreak,
+          completedQuestionIds,
+          answeredStats,
+          unlockedBadgeIds,
+        });
+      }
+    };
+
+    window.addEventListener('beforeunload', handleFlushOnExit);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        handleFlushOnExit();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleFlushOnExit);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [
     studentName,
     avatarId,
     companionId,
@@ -246,12 +308,67 @@ export default function App() {
     setUnlockedBadgeIds(user.unlockedBadgeIds || ['first_step']);
     setIsAuthModalOpen(false);
 
+    // If user is a student and hasn't claimed daily streak bonus today, show popup!
+    const todayStr = getLocalDateString();
+    const isStudent = user.role !== 'admin' && !user.isAdmin && user.username.toLowerCase() !== 'admin';
+    if (isStudent && user.lastDailyBonusDate !== todayStr) {
+      setTimeout(() => {
+        setIsDailyStreakModalOpen(true);
+      }, 550);
+    }
+
     setCompanionReaction('celebrating');
     if (user.role === 'admin' || user.username.toLowerCase() === 'admin') {
       setCustomCompanionMsg(`مرحباً سيادة المشرف (${user.username})! يمكنك التحكم بجميع الحسابات من زر "أدمن كنترول" 🛡️`);
     } else {
       setCustomCompanionMsg(`أهلاً بك يا ${user.username}! جاهز لرحلة الرياضيات اليوم؟`);
     }
+  };
+
+  // Check on initial app load for logged-in student who hasn't claimed today
+  useEffect(() => {
+    if (!currentUser) return;
+    const isStudent = currentUser.role !== 'admin' && !currentUser.isAdmin && currentUser.username.toLowerCase() !== 'admin';
+    const todayStr = getLocalDateString();
+    if (isStudent && currentUser.lastDailyBonusDate !== todayStr && !isAuthModalOpen) {
+      const timer = setTimeout(() => {
+        setIsDailyStreakModalOpen(true);
+      }, 700);
+      return () => clearTimeout(timer);
+    }
+  }, [currentUser?.id, currentUser?.lastDailyBonusDate, isAuthModalOpen]);
+
+  // Handle claiming the Daily Streak Bonus
+  const handleClaimDailyBonus = (bonus: DailyBonusCalculation) => {
+    if (!currentUser) return;
+    const todayStr = getLocalDateString();
+    const newTotalXp = totalXp + bonus.bonusXp;
+    const newStars = stars + bonus.bonusStars;
+    const newStreak = bonus.nextStreak;
+    const newBestStreak = Math.max(bestStreak, newStreak);
+
+    setTotalXp(newTotalXp);
+    setStars(newStars);
+    setStreak(newStreak);
+    setBestStreak(newBestStreak);
+
+    const updates: Partial<UserAccount> = {
+      totalXp: newTotalXp,
+      stars: newStars,
+      streak: newStreak,
+      bestStreak: newBestStreak,
+      lastDailyBonusDate: todayStr,
+    };
+
+    setCurrentUser((prev) => (prev ? { ...prev, ...updates } : null));
+    authService.updateUserData(currentUser.id, updates);
+
+    setCompanionReaction('celebrating');
+    setCustomCompanionMsg(
+      bonus.bonusStars > 0
+        ? `مبارك! حصلت على +${bonus.bonusXp} نقطة XP و ⭐ نجمة ذهبية لمحافظتك على أسبوع كامل من التدريب! 👑`
+        : `أحسنت يا بطل! حصلت على +${bonus.bonusXp} نقطة XP لمواصلة التدريب اليومي! 🔥`
+    );
   };
 
   // Handle logout
@@ -316,7 +433,15 @@ export default function App() {
     });
 
     if (newlyUnlocked.length > 0) {
-      setUnlockedBadgeIds(prev => [...prev, ...newlyUnlocked]);
+      setUnlockedBadgeIds(prev => {
+        const merged = Array.from(new Set([...prev, ...newlyUnlocked]));
+        if (currentUser) {
+          authService.updateUserData(currentUser.id, {
+            unlockedBadgeIds: merged,
+          });
+        }
+        return merged;
+      });
       const firstBadge = BADGES.find(b => b.id === newlyUnlocked[0]);
       if (firstBadge) {
         setRewardModal({
@@ -420,19 +545,40 @@ export default function App() {
       }
 
       setCompanionReaction('correct');
-      setAnsweredStats(prev => ({
-        ...prev,
-        [activeQuestion.id]: { correct: true, attempts: (prev[activeQuestion.id]?.attempts || 0) + 1 },
-      }));
+      const updatedStats = {
+        ...answeredStats,
+        [activeQuestion.id]: { correct: true, attempts: (answeredStats[activeQuestion.id]?.attempts || 0) + 1 },
+      };
+      setAnsweredStats(updatedStats);
+
+      // Immediately persist answer progress to server
+      if (currentUser) {
+        authService.updateUserData(currentUser.id, {
+          totalXp: newXp,
+          stars: newStars,
+          streak: newStreak,
+          bestStreak: newBest,
+          completedQuestionIds: newCompleted,
+          answeredStats: updatedStats,
+        });
+      }
 
       checkBadgeUnlocks(newXp, newStreak, newCompleted);
     } else {
       setStreak(0);
       setCompanionReaction('incorrect');
-      setAnsweredStats(prev => ({
-        ...prev,
-        [activeQuestion.id]: { correct: false, attempts: (prev[activeQuestion.id]?.attempts || 0) + 1 },
-      }));
+      const updatedStats = {
+        ...answeredStats,
+        [activeQuestion.id]: { correct: false, attempts: (answeredStats[activeQuestion.id]?.attempts || 0) + 1 },
+      };
+      setAnsweredStats(updatedStats);
+
+      if (currentUser) {
+        authService.updateUserData(currentUser.id, {
+          streak: 0,
+          answeredStats: updatedStats,
+        });
+      }
     }
   };
 
@@ -596,6 +742,7 @@ export default function App() {
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
         onLogout={handleLogout}
         onOpenAdminControl={() => setIsAdminControlOpen(true)}
+        onOpenDailyStreak={() => setIsDailyStreakModalOpen(true)}
       />
 
       {/* Main Content Area */}
@@ -1013,6 +1160,17 @@ export default function App() {
         companionId={companionId}
         badgeIcon={rewardModal.badgeIcon}
         onClose={() => setRewardModal(prev => ({ ...prev, isOpen: false }))}
+      />
+
+      {/* Daily Streak Bonus Popup */}
+      <DailyStreakModal
+        isOpen={isDailyStreakModalOpen}
+        onClose={() => setIsDailyStreakModalOpen(false)}
+        streak={streak}
+        lastDailyBonusDate={currentUser?.lastDailyBonusDate}
+        companionId={companionId}
+        studentName={studentName}
+        onClaim={handleClaimDailyBonus}
       />
     </div>
   );

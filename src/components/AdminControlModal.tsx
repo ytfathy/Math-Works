@@ -18,6 +18,7 @@ export const AdminControlModal: React.FC<AdminControlModalProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [notification, setNotification] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [userToDelete, setUserToDelete] = useState<{ id: string; username: string } | null>(null);
 
   // Auto-subscribe and auto-fetch fresh users from server when opened
   useEffect(() => {
@@ -82,13 +83,20 @@ export const AdminControlModal: React.FC<AdminControlModalProps> = ({
     setTimeout(() => setNotification(null), 3000);
   };
 
-  const handleDeleteUser = async (userId: string, username: string) => {
-    if (confirm(`هل أنت متأكد من حذف حساب الطالب "${username}" نهائياً من السيرفر؟`)) {
-      sounds.playPop();
+  const executeDeleteUser = async (userId: string, username: string) => {
+    setIsLoading(true);
+    sounds.playPop();
+    try {
       await authService.deleteStudent(userId);
+      setUserToDelete(null);
       await reloadUsers();
-      setNotification(`تم حذف حساب ${username} بنجاح.`);
+      setNotification(`تم حذف حساب الطالب "${username}" نهائياً من السيرفر.`);
       setTimeout(() => setNotification(null), 3000);
+    } catch {
+      setNotification('حدث خطأ أثناء محاولة حذف الحساب من السيرفر');
+      setTimeout(() => setNotification(null), 3000);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -159,6 +167,41 @@ export const AdminControlModal: React.FC<AdminControlModalProps> = ({
             <div className="p-3 bg-emerald-50 border-2 border-emerald-300 rounded-2xl text-emerald-900 text-xs sm:text-sm font-black flex items-center gap-2 animate-bounce">
               <span>✨</span>
               <div>{notification}</div>
+            </div>
+          )}
+
+          {/* In-Modal Delete Confirmation Box (100% reliable, no blocked browser popups) */}
+          {userToDelete && (
+            <div className="p-4 bg-gradient-to-r from-rose-50 to-red-100/70 border-2 border-rose-400 rounded-2xl shadow-md flex flex-col sm:flex-row items-center justify-between gap-3 animate-fade-in">
+              <div className="flex items-center gap-2.5 text-rose-950 font-black text-xs sm:text-sm w-full sm:w-auto text-right">
+                <span className="text-2xl flex-shrink-0 animate-pulse">⚠️</span>
+                <div>
+                  <span>تأكيد الحذف: هل تريد حذف حساب الطالب </span>
+                  <span className="bg-rose-200 text-rose-900 px-2 py-0.5 rounded-lg border border-rose-300 font-extrabold font-mono">
+                    {userToDelete.username}
+                  </span>
+                  <span> نهائياً من السيرفر؟</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 w-full sm:w-auto justify-end flex-shrink-0">
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => executeDeleteUser(userToDelete.id, userToDelete.username)}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-black text-xs rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5 active:scale-95 disabled:opacity-50"
+                >
+                  <span>🗑️</span>
+                  <span>{isLoading ? 'جاري الحذف...' : 'نعم، حذف الحساب نهائياً'}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => setUserToDelete(null)}
+                  className="px-3.5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold text-xs rounded-xl transition cursor-pointer"
+                >
+                  إلغاء
+                </button>
+              </div>
             </div>
           )}
 
@@ -281,9 +324,12 @@ export const AdminControlModal: React.FC<AdminControlModalProps> = ({
 
                           <button
                             type="button"
-                            onClick={() => handleDeleteUser(user.id, user.username)}
+                            onClick={() => {
+                              sounds.playPop();
+                              setUserToDelete({ id: user.id, username: user.username });
+                            }}
                             className="p-1.5 sm:p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition cursor-pointer"
-                            title="حذف حساب الطالب نهائياً من السيرفر"
+                            title={`حذف حساب الطالب "${user.username}" نهائياً من السيرفر`}
                           >
                             🗑️
                           </button>

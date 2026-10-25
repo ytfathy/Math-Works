@@ -131,5 +131,79 @@
     "unlockedBadgeIds": [
       "first_step"
     ]
+  },
+  {
+    "id": "user_asser_math",
+    "username": "Asser",
+    "email": "asser@gmail.com",
+    "password": "password123",
+    "displayName": "Asser (آسر)",
+    "avatar": "🚀",
+    "companionId": "nibbles",
+    "role": "student",
+    "isAdmin": false,
+    "unlockedAllLevels": false,
+    "createdAt": 1792947300000,
+    "totalXp": 320,
+    "stars": 5,
+    "streak": 1,
+    "bestStreak": 2,
+    "completedQuestionIds": [
+      "m1-l1-q1",
+      "m1-l1-q2"
+    ],
+    "answeredStats": {
+      "m1-l1-q1": {
+        "correct": true,
+        "attempts": 1
+      }
+    },
+    "unlockedBadgeIds": [
+      "first_step"
+    ]
+  },
+  {
+    "id": "user_1792952321219_neyjb",
+    "username": "Aser",
+    "email": "youseftarek1707@gmail.com",
+    "password": "Tarekf",
+    "displayName": "Aser",
+    "avatar": "🚀",
+    "companionId": "barnaby",
+    "role": "student",
+    "isAdmin": false,
+    "unlockedAllLevels": false,
+    "createdAt": 1792952321219,
+    "totalXp": 100,
+    "stars": 2,
+    "streak": 0,
+    "bestStreak": 0,
+    "completedQuestionIds": [],
+    "answeredStats": {},
+    "unlockedBadgeIds": [
+      "first_step"
+    ]
+  },
+  {
+    "id": "user_1792952321222_8slol",
+    "username": "Yousef",
+    "email": "youseftarek@gmsil.com",
+    "password": "Tarekf",
+    "displayName": "Yousef",
+    "avatar": "🚀",
+    "companionId": "beepboop",
+    "role": "student",
+    "isAdmin": false,
+    "unlockedAllLevels": false,
+    "createdAt": 1792952321222,
+    "totalXp": 100,
+    "stars": 2,
+    "streak": 0,
+    "bestStreak": 0,
+    "completedQuestionIds": [],
+    "answeredStats": {},
+    "unlockedBadgeIds": [
+      "first_step"
+    ]
   }
 ]

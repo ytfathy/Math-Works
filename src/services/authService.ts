@@ -2,6 +2,57 @@ import { UserAccount } from '../types/math';
 
 const USERS_STORAGE_KEY = 'hmh_users_db_shared_v3';
 const CURRENT_USER_ID_KEY = 'hmh_current_user_id_v3';
+const PENDING_SYNC_KEY = 'hmh_pending_sync_queue_v2';
+
+function getPendingSyncQueue(): Record<string, Partial<UserAccount>> {
+  try {
+    const raw = localStorage.getItem(PENDING_SYNC_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePendingSyncQueue(queue: Record<string, Partial<UserAccount>>): void {
+  try {
+    localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify(queue));
+  } catch (err) {
+    console.error('Error saving pending sync queue:', err);
+  }
+}
+
+function queuePendingProgress(userId: string, updates: Partial<UserAccount>): void {
+  const queue = getPendingSyncQueue();
+  const existing = queue[userId] || {};
+  queue[userId] = {
+    ...existing,
+    ...updates,
+    totalXp: Math.max(existing.totalXp || 0, updates.totalXp !== undefined ? updates.totalXp : 0),
+    stars: Math.max(existing.stars || 0, updates.stars !== undefined ? updates.stars : 0),
+    bestStreak: Math.max(existing.bestStreak || 0, updates.bestStreak !== undefined ? updates.bestStreak : 0),
+    completedQuestionIds: Array.from(new Set([
+      ...(existing.completedQuestionIds || []),
+      ...(updates.completedQuestionIds || [])
+    ])),
+    answeredStats: {
+      ...(existing.answeredStats || {}),
+      ...(updates.answeredStats || {})
+    },
+    unlockedBadgeIds: Array.from(new Set([
+      ...(existing.unlockedBadgeIds || []),
+      ...(updates.unlockedBadgeIds || [])
+    ])),
+  };
+  savePendingSyncQueue(queue);
+}
+
+function clearPendingProgressForUser(userId: string): void {
+  const queue = getPendingSyncQueue();
+  if (queue[userId]) {
+    delete queue[userId];
+    savePendingSyncQueue(queue);
+  }
+}
 
 const DEFAULT_ADMIN: UserAccount = {
   id: 'user_admin_root',
@@ -75,6 +126,25 @@ export const authService = {
   saveLocalUsers(users: UserAccount[]): void {
     try {
       localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+
+      // Keep individual keys synchronized with current logged in user
+      const currentId = this.getCurrentUserId();
+      if (currentId) {
+        const current = users.find(u => u.id === currentId);
+        if (current) {
+          localStorage.setItem('hmh_student_name', current.username);
+          localStorage.setItem('hmh_student_avatar', current.avatar || '🌟');
+          localStorage.setItem('hmh_companion_id', current.companionId || 'nibbles');
+          localStorage.setItem('hmh_total_xp', String(current.totalXp ?? 100));
+          localStorage.setItem('hmh_stars', String(current.stars ?? 2));
+          localStorage.setItem('hmh_streak', String(current.streak ?? 0));
+          localStorage.setItem('hmh_best_streak', String(current.bestStreak ?? 0));
+          localStorage.setItem('hmh_completed_questions', JSON.stringify(current.completedQuestionIds || []));
+          localStorage.setItem('hmh_answered_stats', JSON.stringify(current.answeredStats || {}));
+          localStorage.setItem('hmh_unlocked_badges', JSON.stringify(current.unlockedBadgeIds || ['first_step']));
+        }
+      }
+
       this.notifyListeners(users);
     } catch (err) {
       console.error('Error caching users locally:', err);
@@ -95,20 +165,130 @@ export const authService = {
   setCurrentUser(userId: string | null): void {
     if (userId) {
       localStorage.setItem(CURRENT_USER_ID_KEY, userId);
+      const user = this.getCurrentUser();
+      if (user) {
+        this.saveLocalUsers(this.getUsers());
+      }
     } else {
       localStorage.removeItem(CURRENT_USER_ID_KEY);
     }
   },
 
-  // Asynchronously fetch all users from centralized server
+  // Asynchronously fetch all users from centralized server with Monotonic Merge Guarantee
   async fetchUsersFromServer(): Promise<UserAccount[]> {
+    // 1. Flush any pending queued progress before fetching
+    const queue = getPendingSyncQueue();
+    const queuedUserIds = Object.keys(queue);
+    if (queuedUserIds.length > 0) {
+      for (const uid of queuedUserIds) {
+        try {
+          const res = await fetch(`/api/users/${uid}/progress`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(queue[uid]),
+            keepalive: true,
+          });
+          if (res.ok) {
+            clearPendingProgressForUser(uid);
+          }
+        } catch {
+          // Keep in queue for next sync
+        }
+      }
+    }
+
     try {
       const res = await fetch('/api/users');
       if (res.ok) {
         const data = await res.json();
         if (data.success && Array.isArray(data.users)) {
-          this.saveLocalUsers(data.users);
-          return data.users;
+          const serverUsers: UserAccount[] = data.users;
+          const localUsers = this.getUsers();
+
+          // SMART MONOTONIC MERGE: Never downgrade local XP, stars, bestStreak, or completed questions
+          const mergedUsers: UserAccount[] = serverUsers.map((serverU) => {
+            const localU = localUsers.find(
+              lu => lu.id === serverU.id || lu.username.toLowerCase() === serverU.username.toLowerCase()
+            );
+
+            if (!localU) return serverU;
+
+            const higherXp = Math.max(serverU.totalXp || 0, localU.totalXp || 0);
+            const higherStars = Math.max(serverU.stars || 0, localU.stars || 0);
+            const higherBestStreak = Math.max(serverU.bestStreak || 0, localU.bestStreak || 0);
+            const allCompleted = Array.from(new Set([
+              ...(serverU.completedQuestionIds || []),
+              ...(localU.completedQuestionIds || [])
+            ]));
+            const allBadges = Array.from(new Set([
+              ...(serverU.unlockedBadgeIds || []),
+              ...(localU.unlockedBadgeIds || [])
+            ]));
+            const allStats = {
+              ...(serverU.answeredStats || {}),
+              ...(localU.answeredStats || {})
+            };
+
+            const isLocalHigher =
+              (localU.totalXp || 0) > (serverU.totalXp || 0) ||
+              (localU.completedQuestionIds?.length || 0) > (serverU.completedQuestionIds?.length || 0);
+
+            if (isLocalHigher) {
+              // Push local higher progress back to server immediately
+              fetch(`/api/users/${serverU.id}/progress`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  totalXp: higherXp,
+                  stars: higherStars,
+                  streak: localU.streak,
+                  bestStreak: higherBestStreak,
+                  completedQuestionIds: allCompleted,
+                  answeredStats: allStats,
+                  unlockedBadgeIds: allBadges,
+                }),
+                keepalive: true,
+              }).catch(() => {});
+            }
+
+            return {
+              ...serverU,
+              totalXp: higherXp,
+              stars: higherStars,
+              streak: isLocalHigher ? localU.streak : serverU.streak,
+              bestStreak: higherBestStreak,
+              completedQuestionIds: allCompleted,
+              unlockedBadgeIds: allBadges,
+              answeredStats: allStats,
+            };
+          });
+
+          // Sync any locally registered accounts that might be missing on the server
+          const unsynced = localUsers.filter(
+            lu => lu.role !== 'admin' &&
+            !serverUsers.some(su => su.username.toLowerCase() === lu.username.toLowerCase())
+          );
+
+          if (unsynced.length > 0) {
+            for (const u of unsynced) {
+              fetch('/api/users/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  username: u.username,
+                  email: u.email,
+                  password: u.password,
+                  avatar: u.avatar,
+                  companionId: u.companionId,
+                }),
+                keepalive: true,
+              }).catch(() => {});
+              mergedUsers.push(u);
+            }
+          }
+
+          this.saveLocalUsers(mergedUsers);
+          return mergedUsers;
         }
       }
     } catch (err) {
@@ -246,7 +426,15 @@ export const authService = {
       // Offline fallback
       const currentUsers = this.getUsers();
       const found = currentUsers.find(
-        u => u.username.toLowerCase() === trimmedId || u.email.toLowerCase() === trimmedId
+        u => u.username.toLowerCase() === trimmedId || 
+             u.email.toLowerCase() === trimmedId ||
+             (trimmedId === 'آسر' && u.username.toLowerCase() === 'asser') ||
+             (trimmedId === 'اسر' && u.username.toLowerCase() === 'asser') ||
+             (trimmedId === 'asser' && (u.username === 'آسر' || u.username === 'اسر')) ||
+             (trimmedId === 'يوسف' && u.username.toLowerCase() === 'youssef') ||
+             (trimmedId === 'زياد' && u.username.toLowerCase() === 'ziad') ||
+             (trimmedId === 'ادمن' && u.username.toLowerCase() === 'admin') ||
+             (trimmedId === 'أدمن' && u.username.toLowerCase() === 'admin')
       );
       if (!found) {
         return { success: false, error: 'الحساب غير موجود! تأكد من كتابة الاسم وكلمة المرور' };
@@ -263,28 +451,73 @@ export const authService = {
     this.setCurrentUser(null);
   },
 
-  // Update user stats & send to server
+  // Update user stats with monotonic safety and persistent retry queue
   async updateUserData(userId: string, updates: Partial<UserAccount>): Promise<UserAccount | null> {
     const users = this.getUsers();
     const index = users.findIndex(u => u.id === userId);
     if (index === -1) return null;
 
-    const updatedUser = { ...users[index], ...updates };
-    users[index] = updatedUser;
+    const current = users[index];
+
+    // Monotonic merge locally: XP, stars, bestStreak, and completed questions never regress
+    const newTotalXp = updates.totalXp !== undefined ? Math.max(current.totalXp || 0, updates.totalXp) : current.totalXp;
+    const newStars = updates.stars !== undefined ? Math.max(current.stars || 0, updates.stars) : current.stars;
+    const newStreak = updates.streak !== undefined ? updates.streak : current.streak;
+    const newBestStreak = Math.max(current.bestStreak || 0, updates.bestStreak !== undefined ? updates.bestStreak : 0, newStreak);
+    const newCompleted = Array.from(new Set([
+      ...(current.completedQuestionIds || []),
+      ...(updates.completedQuestionIds || [])
+    ]));
+    const newStats = {
+      ...(current.answeredStats || {}),
+      ...(updates.answeredStats || {})
+    };
+    const newBadges = Array.from(new Set([
+      ...(current.unlockedBadgeIds || []),
+      ...(updates.unlockedBadgeIds || [])
+    ]));
+
+    const mergedUser: UserAccount = {
+      ...current,
+      ...updates,
+      totalXp: newTotalXp,
+      stars: newStars,
+      streak: newStreak,
+      bestStreak: newBestStreak,
+      completedQuestionIds: newCompleted,
+      answeredStats: newStats,
+      unlockedBadgeIds: newBadges,
+    };
+
+    users[index] = mergedUser;
     this.saveLocalUsers(users);
 
-    // Sync to centralized server in background
+    // Save to offline/retry queue immediately
+    queuePendingProgress(userId, updates);
+
+    // Push to server with keepalive: true to ensure delivery even during tab closes or reloads
     try {
-      fetch(`/api/users/${userId}/progress`, {
+      const res = await fetch(`/api/users/${userId}/progress`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
-      }).catch(() => {});
-    } catch {
-      // ignore
+        keepalive: true,
+      });
+
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && json.user) {
+          clearPendingProgressForUser(userId);
+          const fresh = this.getUsers().map(u => u.id === userId ? { ...u, ...json.user } : u);
+          this.saveLocalUsers(fresh);
+          return json.user;
+        }
+      }
+    } catch (err) {
+      console.warn('Could not push progress immediately, safely queued for next sync:', err);
     }
 
-    return updatedUser;
+    return mergedUser;
   },
 
   // Admin toggles level permission on server
