@@ -1,0 +1,6 @@
+{
+  "name": "hmh into math grade 6",
+  "description": "Interactive math game for HMH Into Math Grade 6 with animated character companions, funny rewards, module progress tracking, and student leaderboards.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
